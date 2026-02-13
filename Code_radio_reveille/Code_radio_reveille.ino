@@ -1,3 +1,4 @@
+/************** LIBRAIRIES **************/
 #include <Wire.h>
 #include "RTClib.h"
 
@@ -5,29 +6,35 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
 
-//KPA the best
+#include <I2S.h>   // <<< I2S ajouté
 
+/************** RTC **************/
 RTC_PCF8523 rtc;
 
-/*
-char daysOfTheWeek[7][12] = {
-  "Dimanche", "Lundi", "Mardi", "Mercredi",
-  "Jeudi", "Vendredi", "Samedi"
-}
-*/
-
+/************** TFT **************/
 #define TFT_CS  10
 #define TFT_DC  12
 #define TFT_RST 6
-
 Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
 
+/************** ENCODEUR **************/
 #define ENC_A A3
 #define ENC_B A4
 
 int encoderValue = 0;
 int ApresA = 0;
 
+/************** AUDIO I2S **************/
+const int frequency = 440;
+const int amplitude = 500;
+const int sampleRate = 8000;
+
+const int halfWavelength = sampleRate / frequency;
+
+short audioSample = amplitude;
+int audioCount = 0;
+
+/************** TIMERS **************/
 unsigned long lastDisplayUpdate = 0;
 
 //////////////////////////////////////////////////////////
@@ -35,9 +42,10 @@ unsigned long lastDisplayUpdate = 0;
 void setup() {
 
   Serial.begin(57600);
-  
 
-  // ===== RTC =====
+  Wire.begin();
+
+  /***** RTC *****/
   if (!rtc.begin()) {
     Serial.println("RTC non trouvee");
     while (1);
@@ -49,7 +57,8 @@ void setup() {
 
   rtc.start();
 
-  ///////////////TFT ////////////
+  /***** TFT *****/
+  SPI.begin();
   tft.begin();
   tft.setRotation(1);
   tft.fillScreen(ILI9341_BLACK);
@@ -59,11 +68,17 @@ void setup() {
   tft.setCursor(10, 10);
   tft.println("Radio");
 
-  //// Encodeur  //////
+  /***** ENCODEUR *****/
   pinMode(ENC_A, INPUT);
   pinMode(ENC_B, INPUT);
 
   ApresA = digitalRead(ENC_A);
+
+  /***** I2S MAX98357 *****/
+  if (!I2S.begin(I2S_PHILIPS_MODE, sampleRate, 16)) {
+    Serial.println("Erreur I2S");
+    while (1);
+  }
 }
 
 //////////////////////////////////////////////////////////
@@ -71,10 +86,11 @@ void setup() {
 void loop() {
   lireEncodeur();
   afficherEcran();
+  jouerSon();   // <<< audio ajouté
 }
 
 //////////////////////////////////////////////////////////
-// LECTURE ENCODEUR
+// ENCODEUR
 //////////////////////////////////////////////////////////
 
 void lireEncodeur() {
@@ -92,9 +108,9 @@ void lireEncodeur() {
   ApresA = AvantA;
 }
 
-
-///// AFFICHAGE//////
-
+//////////////////////////////////////////////////////////
+// AFFICHAGE
+//////////////////////////////////////////////////////////
 
 void afficherEcran() {
 
@@ -105,7 +121,6 @@ void afficherEcran() {
 
   tft.fillRect(0, 40, 320, 120, ILI9341_BLACK);
 
-  // Heure
   tft.setCursor(10, 50);
   tft.setTextColor(ILI9341_CYAN);
   tft.print("Heure: ");
@@ -121,9 +136,24 @@ void afficherEcran() {
   if (now.second() < 10) tft.print("0");
   tft.println(now.second());
 
-  // Encodeur//
   tft.setCursor(10, 80);
   tft.setTextColor(ILI9341_YELLOW);
   tft.print("Volume: ");
   tft.println(encoderValue);
-}   dans ce code quand je coupe l alime la RTC garde L hure d arret a la place d affiche l heure de l alumage 
+}
+
+//////////////////////////////////////////////////////////
+// AUDIO I2S
+//////////////////////////////////////////////////////////
+
+void jouerSon() {
+
+  if (audioCount % halfWavelength == 0)
+    audioSample = -audioSample;
+
+  I2S.write(audioSample);
+  I2S.write(audioSample);
+
+  audioCount++;
+}
+  dans ce code quand je coupe l alime la RTC garde L hure d arret a la place d affiche l heure de l alumage 
