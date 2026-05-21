@@ -1,159 +1,252 @@
-/************** LIBRAIRIES **************/
+#include <Arduino.h>
 #include <Wire.h>
-#include "RTClib.h"
-
-#include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
+#include <RTClib.h>
+#include <radio.h>
+#include <RDA5807M.h>
+#include <Adafruit_ZeroI2S.h>
 
-#include <I2S.h>   // <<< I2S ajouté
+// ================================================================
+// CONSTANTES RADIO / TFT
+// ================================================================
+#define FIX_BAND    RADIO_BAND_FM
+#define FIX_STATION 8880
+#define FIX_VOLUME   3
+#define FAV_STATION 10370   // 103.7 MHz
 
-/************** RTC **************/
-RTC_PCF8523 rtc;
-
-/************** TFT **************/
 #define TFT_CS  10
 #define TFT_DC  12
-#define TFT_RST 6
+#define TFT_RST  6
+
+#define ENC_A    A3
+#define ENC_B    A4
+#define ENC_F    13
+#define ENC_F2   11
+#define BP_Mute  A5
+#define BP_Fav   5
+
+#define GAUCHE   A0
+
+#define VOLUME_MAX   5
+#define VOLUME_MIN   0
+#define FREQ_MIN  8750
+#define FREQ_MAX 10800
+#define FREQ_STEP   10
+
+// ================================================================
+// OBJETS
+// ================================================================
 Adafruit_ILI9341 tft(TFT_CS, TFT_DC, TFT_RST);
+RTC_PCF8523      rtc;
+RDA5807M         radio;
+Adafruit_ZeroI2S i2s;
 
-/************** ENCODEUR **************/
-#define ENC_A A3
-#define ENC_B A4
+// ================================================================
+// VARIABLES
+// ================================================================
+int           Volume            = FIX_VOLUME;
+int           Frequence         = FIX_STATION;
+unsigned long lastInterruptVol  = 0;
+unsigned long lastInterruptFreq = 0;
+unsigned long lastHeureUpdate   = 0;
+int           volumeAvantMute   = FIX_VOLUME;
+DateTime      heureDepart;
+unsigned long millisDepart      = 0;
 
-int encoderValue = 0;
-int ApresA = 0;
+// ================================================================
+// PROTOTYPES
+// ================================================================
+void afficherVolume();
+void afficherFrequence();
+void afficherHeure();
+void Interruption_ENC_A();
+void Interruption_ENC_F();
+void Interruption_BP_Mute();
+void Interruption_BP_Fav();
 
-/************** AUDIO I2S **************/
-const int frequency = 440;
-const int amplitude = 500;
-const int sampleRate = 8000;
+// ================================================================
+// AFFICHAGE
+// ================================================================
+void afficherVolume() {
+  tft.setTextSize(2);
+  tft.fillRect(106, 80, 60, 16, ILI9341_BLACK);
+  tft.setCursor(10, 80);
+  tft.setTextColor(ILI9341_GREEN);
+  tft.print("Volume: ");
+  tft.print(Volume);
+}
 
-const int halfWavelength = sampleRate / frequency;
+void afficherFrequence() {
+  tft.setTextSize(2);
+  tft.fillRect(82, 110, 238, 16, ILI9341_BLACK);
+  tft.setCursor(10, 110);
+  tft.setTextColor(ILI9341_MAGENTA);
+  tft.print("Freq: ");
+  tft.print(Frequence / 100);
+  tft.print(".");
+  if ((Frequence % 100) < 10) tft.print("0");
+  tft.print(Frequence % 100);
+  tft.print(" MHz");
+}
 
-short audioSample = amplitude;
-int audioCount = 0;
+void afficherHeure() {
+  if (millis() - lastHeureUpdate < 60000) return;
+  lastHeureUpdate = millis();
 
-/************** TIMERS **************/
-unsigned long lastDisplayUpdate = 0;
+  unsigned long secondesEcoulees = (millis() - millisDepart) / 1000;
+  DateTime now = heureDepart + TimeSpan(secondesEcoulees);
 
-//////////////////////////////////////////////////////////
+  tft.setTextSize(2);
+  tft.fillRect(94, 50, 226, 16, ILI9341_BLACK);
+  tft.setCursor(10, 50);
+  tft.setTextColor(ILI9341_CYAN);
+  tft.print("Heure: ");
+  if (now.hour()   < 10) tft.print("0");
+  tft.print(now.hour());   tft.print(":");
+  if (now.minute() < 10) tft.print("0");
+  tft.print(now.minute());
+}
 
+// ================================================================
+// SETUP
+// ================================================================
 void setup() {
+  pinMode(A2,OUTPUT);
+  delay(3000);
+  Serial.begin(115200);
 
-  Serial.begin(57600);
-
-  Wire.begin();
-
-  /***** RTC *****/
+  // RTC — lecture unique au démarrage
   if (!rtc.begin()) {
     Serial.println("RTC non trouvee");
     while (1);
   }
-
-  if (!rtc.initialized() || rtc.lostPower()) {
+  if (!rtc.initialized() || rtc.lostPower())
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  }
-
   rtc.start();
+  heureDepart  = rtc.now();
+  millisDepart = millis();
 
-  /***** TFT *****/
-  SPI.begin();
+  // TFT
   tft.begin();
   tft.setRotation(1);
   tft.fillScreen(ILI9341_BLACK);
-
-  tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(2);
+  tft.setTextColor(ILI9341_WHITE);
   tft.setCursor(10, 10);
   tft.println("Radio");
+  afficherVolume();
+  afficherFrequence();
 
-  /***** ENCODEUR *****/
-  pinMode(ENC_A, INPUT);
-  pinMode(ENC_B, INPUT);
+  // Affichage immédiat de l'heure
+  lastHeureUpdate = millis() - 60000;
+  afficherHeure();
 
-  ApresA = digitalRead(ENC_A);
+  // Encodeurs + boutons
+  pinMode(ENC_A,   INPUT_PULLUP);
+  pinMode(ENC_B,   INPUT_PULLUP);
+  pinMode(ENC_F,   INPUT_PULLUP);
+  pinMode(ENC_F2,  INPUT_PULLUP);
+  pinMode(BP_Mute, INPUT_PULLUP);
+  pinMode(BP_Fav,  INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_A),   Interruption_ENC_A,   FALLING);
+  attachInterrupt(digitalPinToInterrupt(ENC_F),   Interruption_ENC_F,   FALLING);
+  attachInterrupt(digitalPinToInterrupt(BP_Mute), Interruption_BP_Mute, FALLING);
+  attachInterrupt(digitalPinToInterrupt(BP_Fav),  Interruption_BP_Fav,  FALLING);
 
-  /***** I2S MAX98357 *****/
-  if (!I2S.begin(I2S_PHILIPS_MODE, sampleRate, 16)) {
-    Serial.println("Erreur I2S");
-    while (1);
+  // Radio
+  radio.setup(RADIO_FMSPACING,  RADIO_FMSPACING_100);
+  radio.setup(RADIO_DEEMPHASIS, RADIO_DEEMPHASIS_50);
+  if (!radio.initWire(Wire)) {
+    Serial.println("no radio chip found.");
+    delay(4000);
   }
+  radio.setBandFrequency(FIX_BAND, FIX_STATION);
+  radio.setVolume(FIX_VOLUME * 3);
+  radio.setMono(false);
+  radio.setMute(false);
+
+  // I2S — MAX98357A
+  i2s.begin(I2S_32_BIT, 22050);
+  i2s.enableTx();
+
+  Serial.println("Init OK");
 }
 
-//////////////////////////////////////////////////////////
-
+// ================================================================
+// LOOP
+// ================================================================
 void loop() {
-  lireEncodeur();
-  afficherEcran();
-  jouerSon();   // <<< audio ajouté
+
+  afficherHeure();
+digitalWrite(A2,1);
+  int ADC_Gauche = analogRead(GAUCHE);
+digitalWrite(A2,0);
+  int32_t audioGauche = ((int32_t)ADC_Gauche - 2048) * 1048576;
+  i2s.write(audioGauche, audioGauche);
+
 }
 
-//////////////////////////////////////////////////////////
-// ENCODEUR
-//////////////////////////////////////////////////////////
+// ================================================================
+// INTERRUPTIONS
+// ================================================================
+void Interruption_ENC_A() {
+  if ((millis() - lastInterruptVol) > 500) {
+    lastInterruptVol = millis();
+    if (digitalRead(ENC_B)) Volume++;
+    else                     Volume--;
+    if (Volume > VOLUME_MAX) Volume = VOLUME_MAX;
+    if (Volume < VOLUME_MIN) Volume = VOLUME_MIN;
 
-void lireEncodeur() {
-
-  int AvantA = digitalRead(ENC_A);
-
-  if (AvantA != ApresA) {
-
-    if (digitalRead(ENC_B) != AvantA)
-      encoderValue++;
-    else
-      encoderValue--;
+    if (Volume == VOLUME_MIN) {
+      radio.setMute(true);
+    } else {
+      radio.setMute(false);
+      radio.setVolume(Volume * 3);
+    }
+    afficherVolume();
   }
-
-  ApresA = AvantA;
 }
 
-//////////////////////////////////////////////////////////
-// AFFICHAGE
-//////////////////////////////////////////////////////////
-
-void afficherEcran() {
-
-  if (millis() - lastDisplayUpdate < 500) return;
-  lastDisplayUpdate = millis();
-
-  DateTime now = rtc.now();
-
-  tft.fillRect(0, 40, 320, 120, ILI9341_BLACK);
-
-  tft.setCursor(10, 50);
-  tft.setTextColor(ILI9341_CYAN);
-  tft.print("Heure: ");
-
-  if (now.hour() < 10) tft.print("0");
-  tft.print(now.hour());
-  tft.print(":");
-
-  if (now.minute() < 10) tft.print("0");
-  tft.print(now.minute());
-  tft.print(":");
-
-  if (now.second() < 10) tft.print("0");
-  tft.println(now.second());
-
-  tft.setCursor(10, 80);
-  tft.setTextColor(ILI9341_YELLOW);
-  tft.print("Volume: ");
-  tft.println(encoderValue);
+void Interruption_ENC_F() {
+  if ((millis() - lastInterruptFreq) > 150) {
+    lastInterruptFreq = millis();
+    if (digitalRead(ENC_F2)) Frequence += FREQ_STEP;
+    else                      Frequence -= FREQ_STEP;
+    if (Frequence > FREQ_MAX) Frequence = FREQ_MAX;
+    if (Frequence < FREQ_MIN) Frequence = FREQ_MIN;
+    radio.setFrequency(Frequence);
+    afficherFrequence();
+  }
 }
 
-//////////////////////////////////////////////////////////
-// AUDIO I2S
-//////////////////////////////////////////////////////////
+void Interruption_BP_Mute() {
+  static unsigned long lastChange = 0;
+  if ((millis() - lastChange) < 50) return;
+  lastChange = millis();
 
-void jouerSon() {
-
-  if (audioCount % halfWavelength == 0)
-    audioSample = -audioSample;
-
-  I2S.write(audioSample);
-  I2S.write(audioSample);
-
-  audioCount++;
+  if (digitalRead(BP_Mute) == LOW) {
+    if (Volume == 0) {
+      Volume = volumeAvantMute;
+      radio.setMute(false);
+      radio.setVolume(Volume * 3);
+    } else {
+      volumeAvantMute = Volume;
+      Volume = 0;
+      radio.setMute(true);
+    }
+    afficherVolume();
+  }
 }
-  dans ce code quand je coupe l alime la RTC garde L hure d arret a la place d affiche l heure de l alumage 
+
+void Interruption_BP_Fav() {
+  static unsigned long lastChange = 0;
+  if ((millis() - lastChange) < 50) return;
+  lastChange = millis();
+
+  if (digitalRead(BP_Fav) == LOW) {
+    Frequence = FAV_STATION;
+    radio.setFrequency(Frequence);
+    afficherFrequence();
+  }
+}
